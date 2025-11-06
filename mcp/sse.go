@@ -1,4 +1,4 @@
-package main
+package mcp
 
 import (
 	"bufio"
@@ -13,7 +13,7 @@ import (
 )
 
 // DumpEvent is an event handler that dumps received events to stdout
-func (c *McpClient) DumpEvent(data string) error {
+func (c *Client) DumpEvent(data string) error {
 	if data == "" {
 		return nil
 	}
@@ -35,7 +35,7 @@ func (c *McpClient) DumpEvent(data string) error {
 
 // processSSEEvents processes SSE events from the response body, looking for an endpoint event
 // It sends nil to the channel when an endpoint is found, or an error if something goes wrong
-func (c *McpClient) processSSEEvents(ctx context.Context, respBody io.ReadCloser, endpointChan chan error) {
+func (c *Client) processSSEEvents(ctx context.Context, respBody io.ReadCloser, endpointChan chan error) {
 	defer respBody.Close()
 
 	scanner := bufio.NewScanner(respBody)
@@ -116,7 +116,7 @@ func (c *McpClient) processSSEEvents(ctx context.Context, respBody io.ReadCloser
 				endpointFound := c.handleEndpointEvent(eventJSON, data)
 				if endpointFound {
 					// Signal that endpoint was found, but continue processing events
-					// This allows us to receive the initialize response and other events
+					// This allows us to receive the lize response and other events
 					select {
 					case endpointChan <- nil:
 						// Channel sent, continue processing
@@ -172,7 +172,7 @@ func (c *McpClient) processSSEEvents(ctx context.Context, respBody io.ReadCloser
 
 // handleEndpointEvent checks if the event is an endpoint event and extracts the endpoint
 // Returns true if an endpoint was found and set, false otherwise
-func (c *McpClient) handleEndpointEvent(eventJSON map[string]interface{}, rawData string) bool {
+func (c *Client) handleEndpointEvent(eventJSON map[string]interface{}, rawData string) bool {
 	// Try multiple ways to detect and extract the endpoint
 	method, hasMethod := eventJSON["method"].(string)
 	eventType, hasEventType := eventJSON["event"].(string)
@@ -248,9 +248,9 @@ func (c *McpClient) handleEndpointEvent(eventJSON map[string]interface{}, rawDat
 
 // ConnectSSE connects to the MCP server via SSE and blocks until it receives an "endpoint" event
 // It returns the endpoint URL that should be used for subsequent requests
-func (c *McpClient) ConnectSSE(ctx context.Context, sessionID string) (string, error) {
+func (c *Client) ConnectSSE(ctx context.Context, sessionID string) (string, error) {
 	if c.token == nil {
-		return "", fmt.Errorf("no access token available, call getOAuth2Token() first")
+		return "", fmt.Errorf("no access token available, call GetOAuth2Token() first")
 	}
 
 	// Create a channel to wait for endpoint event
@@ -310,4 +310,11 @@ func (c *McpClient) ConnectSSE(ctx context.Context, sessionID string) (string, e
 	}
 
 	return c.endpoint, nil
+}
+
+// GetLastSSEEvent returns the timestamp of the last SSE event received
+func (c *Client) GetLastSSEEvent() time.Time {
+	c.lastSSEEventMu.RLock()
+	defer c.lastSSEEventMu.RUnlock()
+	return c.lastSSEEvent
 }

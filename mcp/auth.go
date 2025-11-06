@@ -1,4 +1,4 @@
-package main
+package mcp
 
 import (
 	"bytes"
@@ -11,56 +11,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sync"
-	"time"
 
 	"golang.org/x/oauth2"
 )
 
-const (
-	McpToolScope = "mcp:tools"
-)
-
-type InitializeRequest struct {
-	JSONRPC string           `json:"jsonrpc"`
-	ID      int              `json:"id"`
-	Method  string           `json:"method"`
-	Params  InitializeParams `json:"params"`
-}
-
-type InitializeParams struct {
-	//SessionID       string       `json:"sessionId"`
-	ProtocolVersion string       `json:"protocolVersion"`
-	Capabilities    Capabilities `json:"capabilities"`
-	ClientInfo      ClientInfo   `json:"clientInfo"`
-}
-
-type Capabilities struct {
-	Roots Roots `json:"roots"`
-}
-
-type Roots struct {
-	ListChanged bool `json:"listChanged"`
-}
-
-type ClientInfo struct {
-	Name    string `json:"name"`
-	Title   string `json:"title"`
-	Version string `json:"version"`
-}
-
-type InitializeResponse struct {
-	JSONRPC string           `json:"jsonrpc"`
-	ID      int              `json:"id"`
-	Result  InitializeResult `json:"result"`
-}
-
-type InitializeResult struct {
-	ProtocolVersion string       `json:"protocolVersion"`
-	Capabilities    Capabilities `json:"capabilities"`
-	ServerInfo      ClientInfo   `json:"serverInfo"`
-	Instructions    string       `json:"instructions"`
-}
 type McpAuthorizationServerInfo struct {
 	Issuer                 string   `json:"issuer"`
 	AuthorizationEndpoint  string   `json:"authorization_endpoint"`
@@ -89,33 +43,7 @@ type ClientRegistrationResponse struct {
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
 }
 
-type McpClient struct {
-	mcpUrl         string
-	port           int
-	authServerInfo *McpAuthorizationServerInfo
-	clientInfo     *ClientRegistrationResponse
-	token          *oauth2.Token
-	codeVerifier   string // PKCE code verifier
-	codeChallenge  string // PKCE code challenge
-	events         map[int]string
-	endpoint       string       // Endpoint URL received from SSE
-	lastSSEEvent   time.Time    // Timestamp of the last SSE event received
-	lastSSEEventMu sync.RWMutex // Mutex to protect lastSSEEvent
-	useSSE         bool         // Whether to use SSE
-	messageChan    chan []byte  // Channel for receiving message events from SSE
-}
-
-func CreateMcpClient(mcpUrl string, port int, useSSE bool) *McpClient {
-	return &McpClient{
-		mcpUrl:      mcpUrl,
-		port:        port,
-		events:      make(map[int]string),
-		useSSE:      useSSE,
-		messageChan: make(chan []byte), // Blocking channel for message events
-	}
-}
-
-func (c *McpClient) discoverAuthorizationServer() error {
+func (c *Client) DiscoverAuthorizationServer() error {
 	u, err := url.Parse(c.mcpUrl)
 	if err != nil {
 		return fmt.Errorf("failed to parse MCP URL: %v", err)
@@ -145,10 +73,10 @@ func (c *McpClient) discoverAuthorizationServer() error {
 }
 
 // Dynamically register an OAuth2 Client using the discovered registration_endpoint
-func (c *McpClient) registerOAuth2Client() error {
+func (c *Client) RegisterOAuth2Client() error {
 	///Discover (if necessary)
 	if c.authServerInfo == nil {
-		err := c.discoverAuthorizationServer()
+		err := c.DiscoverAuthorizationServer()
 		if err != nil {
 			return fmt.Errorf("failed to discover authorization server: %v", err)
 		}
@@ -195,9 +123,9 @@ func (c *McpClient) registerOAuth2Client() error {
 	return nil
 }
 
-func (c *McpClient) getOAuth2Token() error {
+func (c *Client) GetOAuth2Token() error {
 	if c.clientInfo == nil {
-		err := c.registerOAuth2Client()
+		err := c.RegisterOAuth2Client()
 		if err != nil {
 			return fmt.Errorf("failed to register OAuth2 client: %v", err)
 		}
@@ -306,8 +234,6 @@ func (c *McpClient) getOAuth2Token() error {
 	if err != nil {
 		return fmt.Errorf("failed to exchange authorization code for token: %v", err)
 	}
-
-	fmt.Printf("Token: %+v\n", token)
 	c.token = token
 	return nil
 }
@@ -327,145 +253,4 @@ func generatePKCE() (verifier string, challenge string, err error) {
 	challenge = base64.RawURLEncoding.EncodeToString(hash[:])
 
 	return verifier, challenge, nil
-}
-
-func (c *McpClient) initialize() error {
-	request := InitializeRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "initialize",
-		Params: InitializeParams{
-			ProtocolVersion: "2025-11-06",
-			Capabilities:    Capabilities{},
-			ClientInfo: ClientInfo{
-				Name:    "MCP Playground",
-				Title:   "MCP Playground",
-				Version: "1.0.0",
-			},
-		},
-	}
-	fmt.Printf("Sending Initialize Request\n")
-	requestBody, err := json.Marshal(request)
-	fmt.Printf("Request Body: %s\n", string(requestBody))
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %v", err)
-	}
-
-	initRequestUrl := c.endpoint
-	if initRequestUrl == "" {
-		return fmt.Errorf("endpoint not set, call ConnectSSE first")
-	}
-	fmt.Printf("Init Request URL: %s\n", initRequestUrl)
-
-	req, err := http.NewRequest(http.MethodPost, initRequestUrl, bytes.NewBuffer(requestBody))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("accept", "application/json")
-	req.Header.Add("authorization", fmt.Sprintf("Bearer %s", c.token.AccessToken))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
-	}
-
-	fmt.Printf("Received 202 Accepted, waiting for message from SSE stream...\n")
-
-	// Wait for a message from the message channel
-	select {
-	case message := <-c.messageChan:
-		fmt.Printf("Received message from SSE stream: %s\n", string(message))
-		// TODO: Parse and handle the message if needed
-	case <-time.After(30 * time.Second):
-		return fmt.Errorf("timeout waiting for message from SSE stream")
-	}
-	return nil
-}
-
-func (c *McpClient) GetEvent(id int) error {
-	return nil
-}
-
-func (c *McpClient) listMCPServerTools() ([]Tool, error) {
-	// Create the JSON-RPC request payload
-	request := RPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "tools/list",
-		Params:  map[string]interface{}{},
-	}
-
-	// Marshal the request into JSON
-	requestBody, err := json.Marshal(request)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %v", err)
-	}
-
-	// Use the endpoint received from SSE
-	if c.endpoint == "" {
-		return nil, fmt.Errorf("endpoint not set, call ConnectSSE first")
-	}
-
-	// Send the HTTP POST request
-	req, err := http.NewRequest(http.MethodPost, c.endpoint, bytes.NewBuffer(requestBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Add("authorization", fmt.Sprintf("Bearer %s", c.token.AccessToken))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Check HTTP status
-	if resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
-	}
-
-	fmt.Printf("Received 202 Accepted, waiting for message from SSE stream...\n")
-
-	// Wait for a message from the message channel
-	var message []byte
-	select {
-	case message = <-c.messageChan:
-		fmt.Printf("Received message from SSE stream: %s\n", string(message))
-	case <-time.After(30 * time.Second):
-		return nil, fmt.Errorf("timeout waiting for message from SSE stream")
-	}
-
-	// Parse the message as a JSON-RPC response
-	var rpcResponse RPCResponse
-	if err := json.Unmarshal(message, &rpcResponse); err != nil {
-		return nil, fmt.Errorf("failed to decode message response: %v", err)
-	}
-
-	// Check for errors in the response
-	if rpcResponse.Error != nil {
-		return nil, fmt.Errorf("RPC error (code %d): %s", rpcResponse.Error.Code, rpcResponse.Error.Message)
-	}
-
-	// Unmarshal the result into the ToolsListResult structure
-	var result ToolsListResult
-	if err := json.Unmarshal(rpcResponse.Result, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal result: %v", err)
-	}
-	fmt.Printf("Tools: %+v\n", result.Tools)
-
-	return result.Tools, nil
-}
-
-// GetLastSSEEvent returns the timestamp of the last SSE event received
-func (c *McpClient) GetLastSSEEvent() time.Time {
-	c.lastSSEEventMu.RLock()
-	defer c.lastSSEEventMu.RUnlock()
-	return c.lastSSEEvent
 }
