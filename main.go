@@ -46,7 +46,7 @@ type ToolsListResult struct {
 func main() {
 	mcpUrl := "https://mcp.atlassian.com/v1/sse"
 	//Discover the authorization server
-	mcpClient := CreateMcpClient(mcpUrl, 8090)
+	mcpClient := CreateMcpClient(mcpUrl, 8090, true)
 	err := mcpClient.discoverAuthorizationServer()
 	if err != nil {
 		log.Fatalf("Failed to discover authorization server: %v", err)

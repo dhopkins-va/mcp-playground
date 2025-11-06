@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -12,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -103,13 +101,17 @@ type McpClient struct {
 	endpoint       string       // Endpoint URL received from SSE
 	lastSSEEvent   time.Time    // Timestamp of the last SSE event received
 	lastSSEEventMu sync.RWMutex // Mutex to protect lastSSEEvent
+	useSSE         bool         // Whether to use SSE
+	messageChan    chan []byte  // Channel for receiving message events from SSE
 }
 
-func CreateMcpClient(mcpUrl string, port int) *McpClient {
+func CreateMcpClient(mcpUrl string, port int, useSSE bool) *McpClient {
 	return &McpClient{
-		mcpUrl: mcpUrl,
-		port:   port,
-		events: make(map[int]string),
+		mcpUrl:      mcpUrl,
+		port:        port,
+		events:      make(map[int]string),
+		useSSE:      useSSE,
+		messageChan: make(chan []byte), // Blocking channel for message events
 	}
 }
 
@@ -344,6 +346,7 @@ func (c *McpClient) initialize() error {
 	}
 	fmt.Printf("Sending Initialize Request\n")
 	requestBody, err := json.Marshal(request)
+	fmt.Printf("Request Body: %s\n", string(requestBody))
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %v", err)
 	}
@@ -372,13 +375,16 @@ func (c *McpClient) initialize() error {
 		return fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
 	}
 
-	fmt.Printf("Waiting for 10 seconds...\n")
-	time.Sleep(10 * time.Second)
-	// //TODO: Read the response from the SSE stream
-	// err = c.GetEvent(1)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to get event: %v", err)
-	// }
+	fmt.Printf("Received 202 Accepted, waiting for message from SSE stream...\n")
+
+	// Wait for a message from the message channel
+	select {
+	case message := <-c.messageChan:
+		fmt.Printf("Received message from SSE stream: %s\n", string(message))
+		// TODO: Parse and handle the message if needed
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("timeout waiting for message from SSE stream")
+	}
 	return nil
 }
 
@@ -420,15 +426,26 @@ func (c *McpClient) listMCPServerTools() ([]Tool, error) {
 	defer resp.Body.Close()
 
 	// Check HTTP status
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Read and unmarshal the response
+	fmt.Printf("Received 202 Accepted, waiting for message from SSE stream...\n")
+
+	// Wait for a message from the message channel
+	var message []byte
+	select {
+	case message = <-c.messageChan:
+		fmt.Printf("Received message from SSE stream: %s\n", string(message))
+	case <-time.After(30 * time.Second):
+		return nil, fmt.Errorf("timeout waiting for message from SSE stream")
+	}
+
+	// Parse the message as a JSON-RPC response
 	var rpcResponse RPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResponse); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %v", err)
+	if err := json.Unmarshal(message, &rpcResponse); err != nil {
+		return nil, fmt.Errorf("failed to decode message response: %v", err)
 	}
 
 	// Check for errors in the response
@@ -446,288 +463,9 @@ func (c *McpClient) listMCPServerTools() ([]Tool, error) {
 	return result.Tools, nil
 }
 
-// DumpEvent is an event handler that dumps received events to stdout
-func (c *McpClient) DumpEvent(data string) error {
-	if data == "" {
-		return nil
-	}
-
-	// Try to parse as JSON for pretty printing
-	var eventJSON map[string]interface{}
-	if err := json.Unmarshal([]byte(data), &eventJSON); err == nil {
-		eventBytes, err := json.MarshalIndent(eventJSON, "", "  ")
-		if err == nil {
-			fmt.Printf("Event received:\n%s\n\n", string(eventBytes))
-			return nil
-		}
-	}
-
-	// If not JSON or marshaling failed, just print the raw data
-	fmt.Printf("Event received (raw):\n%s\n\n", data)
-	return nil
-}
-
 // GetLastSSEEvent returns the timestamp of the last SSE event received
 func (c *McpClient) GetLastSSEEvent() time.Time {
 	c.lastSSEEventMu.RLock()
 	defer c.lastSSEEventMu.RUnlock()
 	return c.lastSSEEvent
-}
-
-// ConnectSSE connects to the MCP server via SSE and blocks until it receives an "endpoint" event
-// It returns the endpoint URL that should be used for subsequent requests
-func (c *McpClient) ConnectSSE(ctx context.Context, sessionID string) (string, error) {
-	if c.token == nil {
-		return "", fmt.Errorf("no access token available, call getOAuth2Token() first")
-	}
-
-	// Create a channel to wait for endpoint event
-	sessionIDChan := make(chan error, 1)
-
-	go func() {
-		// Build the SSE endpoint URL
-		sseURL := c.mcpUrl //+ "?sessionId=" + sessionID
-
-		// Create HTTP request
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
-		if err != nil {
-			sessionIDChan <- fmt.Errorf("failed to create SSE request: %v", err)
-			return
-		}
-
-		// Set headers for SSE
-		req.Header.Set("Accept", "text/event-stream")
-		req.Header.Set("Cache-Control", "no-cache")
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token.AccessToken))
-
-		// Send the request with a client that has no timeout for long-lived SSE connections
-		client := &http.Client{
-			Timeout: 0, // No timeout for SSE connections
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			sessionIDChan <- fmt.Errorf("failed to connect to SSE endpoint: %v", err)
-			return
-		}
-		defer resp.Body.Close()
-
-		// Check response status
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			sessionIDChan <- fmt.Errorf("SSE connection failed with status %d: %s", resp.StatusCode, string(body))
-			return
-		}
-
-		// Ensure we're receiving SSE content
-		contentType := resp.Header.Get("Content-Type")
-		if !strings.HasPrefix(contentType, "text/event-stream") {
-			sessionIDChan <- fmt.Errorf("unexpected content type: %s, expected text/event-stream", contentType)
-			return
-		}
-
-		fmt.Printf("Connected to SSE stream. Waiting for endpoint event...\n")
-
-		// Read SSE events
-		scanner := bufio.NewScanner(resp.Body)
-		var eventData strings.Builder
-		currentEvent := make(map[string]string)
-
-		for scanner.Scan() {
-			line := scanner.Text()
-
-			// Check for SSE comment lines (starting with ':') - these are keep-alives
-			if strings.HasPrefix(line, ":") {
-				fmt.Printf("Keep-Alive %s\n", time.Now().Format(time.RFC3339))
-				continue
-			}
-
-			// Empty line indicates end of event
-			if line == "" {
-				// Check if this is a keep-alive event (empty event or event type is keep-alive)
-				eventType, hasEventType := currentEvent["event"]
-				if eventData.Len() == 0 && len(currentEvent) == 0 {
-					// Empty event - likely a keep-alive
-					fmt.Printf("Keep-Alive %s\n", time.Now().Format(time.RFC3339))
-					continue
-				}
-
-				if hasEventType && (eventType == "keep-alive" || eventType == "keepalive") {
-					// This is a keep-alive event, discard it but print the time
-					fmt.Printf("Keep-Alive %s\n", time.Now().Format(time.RFC3339))
-					eventData.Reset()
-					currentEvent = make(map[string]string)
-					continue
-				}
-
-				if eventData.Len() > 0 || len(currentEvent) > 0 {
-					// Update the last SSE event timestamp
-					c.lastSSEEventMu.Lock()
-					c.lastSSEEvent = time.Now()
-					c.lastSSEEventMu.Unlock()
-
-					// Parse the accumulated event data
-					data := eventData.String()
-					eventData.Reset()
-
-					// Try to parse as JSON
-					var eventJSON map[string]interface{}
-					if data != "" {
-						if err := json.Unmarshal([]byte(data), &eventJSON); err != nil {
-							// If not JSON, create a simple map with the data
-							eventJSON = make(map[string]interface{})
-							eventJSON["data"] = data
-						}
-					} else {
-						eventJSON = make(map[string]interface{})
-					}
-
-					// Add other SSE fields to the event
-					for k, v := range currentEvent {
-						if k != "data" {
-							eventJSON[k] = v
-						}
-					}
-
-					fmt.Printf("Event: %s\n", data)
-					fmt.Printf("Event JSON: %+v\n", eventJSON)
-
-					// Check if this is an "endpoint" event
-					// Try multiple ways to detect and extract the endpoint
-					method, hasMethod := eventJSON["method"].(string)
-					eventType, hasEventType := eventJSON["event"].(string)
-
-					// Debug: print what we're checking
-					fmt.Printf("Checking for endpoint: method=%v (hasMethod=%v), eventType=%v (hasEventType=%v)\n",
-						method, hasMethod, eventType, hasEventType)
-
-					// Check if method is "endpoint" or event type is "endpoint"
-					isEndpointEvent := (hasMethod && method == "endpoint") || (hasEventType && eventType == "endpoint")
-
-					// Also check if the event has an endpoint field directly (might be a notification)
-					if endpoint, ok := eventJSON["endpoint"].(string); ok && endpoint != "" {
-						c.endpoint = endpoint
-						fmt.Printf("Received endpoint (direct field): %s\n", endpoint)
-						sessionIDChan <- nil
-					}
-
-					if isEndpointEvent {
-						var endpointStr string
-						// For endpoint events, the endpoint might be in the data field
-						if dataStr, ok := eventJSON["data"].(string); ok && dataStr != "" {
-							endpointStr = dataStr
-						} else if data != "" && !strings.HasPrefix(strings.TrimSpace(data), "{") {
-							// Data is not JSON, it's likely the endpoint URL itself
-							endpointStr = strings.TrimSpace(data)
-						}
-
-						if endpointStr != "" {
-							// If endpoint is a relative path, combine it with the base URL
-							if strings.HasPrefix(endpointStr, "/") {
-								// Parse the base URL to get the scheme and host
-								baseURL, err := url.Parse(c.mcpUrl)
-								if err == nil {
-									// Combine base URL with relative path
-									endpointURL, err := url.Parse(endpointStr)
-									if err == nil {
-										endpointURL.Scheme = baseURL.Scheme
-										endpointURL.Host = baseURL.Host
-										c.endpoint = endpointURL.String()
-									} else {
-										// Fallback: just prepend the base URL
-										c.endpoint = strings.TrimSuffix(c.mcpUrl, "/v1/sse") + endpointStr
-									}
-								} else {
-									// Fallback: use as-is
-									c.endpoint = endpointStr
-								}
-							} else {
-								// Already a full URL
-								c.endpoint = endpointStr
-							}
-							fmt.Printf("Received endpoint: %s\n", c.endpoint)
-							sessionIDChan <- nil
-						}
-						// Extract endpoint from params
-						if params, ok := eventJSON["params"].(map[string]interface{}); ok {
-							if endpoint, ok := params["endpoint"].(string); ok && endpoint != "" {
-								c.endpoint = endpoint
-								fmt.Printf("Received endpoint (from params): %s\n", endpoint)
-								sessionIDChan <- nil
-							}
-						}
-						// Or check in result
-						if result, ok := eventJSON["result"].(map[string]interface{}); ok {
-							if endpoint, ok := result["endpoint"].(string); ok && endpoint != "" {
-								c.endpoint = endpoint
-								fmt.Printf("Received endpoint (from result): %s\n", endpoint)
-								sessionIDChan <- nil
-							}
-						}
-						// Or check if result is a string (the endpoint itself)
-						if result, ok := eventJSON["result"].(string); ok && result != "" {
-							c.endpoint = result
-							fmt.Printf("Received endpoint (result as string): %s\n", result)
-							sessionIDChan <- nil
-						}
-					}
-
-					// Call the handler for non-endpoint events
-					c.DumpEvent(data)
-
-					// Reset for next event
-					currentEvent = make(map[string]string)
-				}
-				continue
-			}
-
-			// Parse SSE line format: "field: value"
-			// SSE spec allows multiple data lines which should be concatenated with \n
-			if strings.HasPrefix(line, "data:") {
-				data := strings.TrimPrefix(line, "data:")
-				data = strings.TrimSpace(data)
-				if eventData.Len() > 0 {
-					eventData.WriteString("\n")
-				}
-				eventData.WriteString(data)
-				// Store latest data value (for non-JSON case)
-				currentEvent["data"] = eventData.String()
-			} else if strings.Contains(line, ":") {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
-					field := strings.TrimSpace(parts[0])
-					value := strings.TrimSpace(parts[1])
-					currentEvent[field] = value
-				}
-			}
-
-			// Check if context is cancelled
-			select {
-			case <-ctx.Done():
-				sessionIDChan <- ctx.Err()
-				return
-			default:
-			}
-		}
-
-		// Check for scanner errors
-		if err := scanner.Err(); err != nil {
-			sessionIDChan <- fmt.Errorf("error reading SSE stream: %v", err)
-			return
-		}
-
-		// If we get here, the stream ended without receiving an endpoint
-		sessionIDChan <- fmt.Errorf("SSE stream ended without receiving endpoint event")
-	}()
-
-	err := <-sessionIDChan
-	if err != nil {
-		return "", err
-	}
-
-	// Verify endpoint was set
-	if c.endpoint == "" {
-		return "", fmt.Errorf("endpoint was not set")
-	}
-
-	return c.endpoint, nil
 }
