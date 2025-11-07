@@ -95,19 +95,21 @@ type Client struct {
 	codeVerifier    string // PKCE code verifier
 	codeChallenge   string // PKCE code challenge
 	events          map[int]string
-	endpoint        string        // Endpoint URL received from SSE
-	lastSSEEvent    time.Time     // Timestamp of the last SSE event received
-	lastSSEEventMu  sync.RWMutex  // Mutex to protect lastSSEEvent
-	transport       TransportType // The transport to use
-	useSSE          bool          // Whether to use SSE
-	sseReady        bool          // Whether SSE is actively listening
-	sseReadyMu      sync.RWMutex  // Mutex to protect sseReady
-	messageChan     chan []byte   // Channel for receiving message events from SSE
-	idCounter       int           // Counter for JSON-RPC request IDs
-	idCounterMu     sync.Mutex    // Mutex to protect idCounter
-	serverVersion   string        // Server's MCP protocol version
-	serverVersionMu sync.RWMutex  // Mutex to protect serverVersion
-	sessionId       string        // Session ID
+	endpoint        string          // Endpoint URL received from SSE
+	lastSSEEvent    time.Time       // Timestamp of the last SSE event received
+	lastSSEEventMu  sync.RWMutex    // Mutex to protect lastSSEEvent
+	transport       TransportType   // The transport to use
+	useSSE          bool            // Whether to use SSE
+	sseReady        bool            // Whether SSE is actively listening
+	sseReadyMu      sync.RWMutex    // Mutex to protect sseReady
+	messageChan     chan []byte     // Channel for receiving message events from SSE
+	idCounter       int             // Counter for JSON-RPC request IDs
+	idCounterMu     sync.Mutex      // Mutex to protect idCounter
+	serverVersion   string          // Server's MCP protocol version
+	serverVersionMu sync.RWMutex    // Mutex to protect serverVersion
+	sessionId       string          // Session ID
+	tools           map[string]Tool // Map of tools indexed by name
+	toolsMu         sync.RWMutex    // Mutex to protect tools map
 }
 
 func CreateClient(mcpUrl string, port int, transport TransportType) *Client {
@@ -127,8 +129,9 @@ func CreateClient(mcpUrl string, port int, transport TransportType) *Client {
 		endpoint:    endpoint,
 		events:      make(map[int]string),
 		useSSE:      useSSE,
-		messageChan: make(chan []byte), // Blocking channel for message events
-		idCounter:   0,                 // Start IDs at 0, first call will return 1
+		messageChan: make(chan []byte),     // Blocking channel for message events
+		idCounter:   0,                     // Start IDs at 0, first call will return 1
+		tools:       make(map[string]Tool), // Initialize tools map
 	}
 }
 
@@ -222,6 +225,7 @@ func (c *Client) Initialize() error {
 		return fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
 	}
 
+	fmt.Printf("Received Initialize Response: %s\n", string(body))
 	// Parse the body into the InitializeResponse structure
 	var initializeResponse InitializeResponse
 	if err := json.Unmarshal(body, &initializeResponse); err != nil {

@@ -112,6 +112,7 @@ func (c *Client) ListTools() ([]Tool, error) {
 	if c.sessionId != "" {
 		req.Header.Set("mcp-session-id", c.sessionId)
 	}
+	req.Header.Set("accept", "application/json, text/event-stream")
 	req.Header.Set("mcp-protocol-version", c.serverVersion)
 	req.Header.Add("authorization", fmt.Sprintf("Bearer %s", c.token.AccessToken))
 	resp, err := http.DefaultClient.Do(req)
@@ -121,25 +122,28 @@ func (c *Client) ListTools() ([]Tool, error) {
 	defer resp.Body.Close()
 
 	// Check HTTP status
-	if resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
+	var body []byte
+	switch resp.StatusCode {
+	case http.StatusOK:
+		body, _ = io.ReadAll(resp.Body)
+	case http.StatusAccepted:
+		if !c.useSSE {
+			return nil, fmt.Errorf("Unexpected intialization respoonse: 202 Accepted, but SSE is not forced")
+		}
+		fmt.Printf("Received 202 Accepted, waiting for message from SSE stream...\n")
+		select {
+		case body = <-c.messageChan:
+			break
+		case <-time.After(30 * time.Second):
+			return nil, fmt.Errorf("timeout waiting for message from SSE stream")
+		}
+	default:
 		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
-	}
-
-	fmt.Printf("Received 202 Accepted, waiting for message from SSE stream...\n")
-
-	// Wait for a message from the message channel
-	var message []byte
-	select {
-	case message = <-c.messageChan:
-		break
-	case <-time.After(30 * time.Second):
-		return nil, fmt.Errorf("timeout waiting for message from SSE stream")
 	}
 
 	// Parse the message as a JSON-RPC response
 	var rpcResponse RPCResponse
-	if err := json.Unmarshal(message, &rpcResponse); err != nil {
+	if err := json.Unmarshal(body, &rpcResponse); err != nil {
 		return nil, fmt.Errorf("failed to decode message response: %v", err)
 	}
 
@@ -153,6 +157,13 @@ func (c *Client) ListTools() ([]Tool, error) {
 	if err := json.Unmarshal(rpcResponse.Result, &result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal result: %v", err)
 	}
+
+	// Update the tools map indexed by tool name
+	c.toolsMu.Lock()
+	for _, tool := range result.Tools {
+		c.tools[tool.Name] = tool
+	}
+	c.toolsMu.Unlock()
 
 	return result.Tools, nil
 }
@@ -185,6 +196,7 @@ func (c *Client) CallTool(toolName string, input map[string]interface{}) (*CallT
 	if c.sessionId != "" {
 		req.Header.Set("mcp-session-id", c.sessionId)
 	}
+	req.Header.Set("accept", "application/json, text/event-stream")
 	req.Header.Set("mcp-protocol-version", c.serverVersion)
 	req.Header.Add("authorization", fmt.Sprintf("Bearer %s", c.token.AccessToken))
 	resp, err := http.DefaultClient.Do(req)
@@ -194,25 +206,28 @@ func (c *Client) CallTool(toolName string, input map[string]interface{}) (*CallT
 	defer resp.Body.Close()
 
 	// Check HTTP status
-	if resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
+	var body []byte
+	switch resp.StatusCode {
+	case http.StatusOK:
+		body, _ = io.ReadAll(resp.Body)
+	case http.StatusAccepted:
+		if !c.useSSE {
+			return nil, fmt.Errorf("unexpected response: 202 Accepted, but SSE is not enabled")
+		}
+		fmt.Printf("Received 202 Accepted, waiting for message from SSE stream...\n")
+		select {
+		case body = <-c.messageChan:
+		case <-time.After(30 * time.Second):
+			return nil, fmt.Errorf("timeout waiting for message from SSE stream")
+		}
+	default:
+		body, _ = io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
-	}
-
-	fmt.Printf("Received 202 Accepted, waiting for message from SSE stream...\n")
-
-	// Wait for a message from the message channel
-	var message []byte
-	select {
-	case message = <-c.messageChan:
-		break
-	case <-time.After(30 * time.Second):
-		return nil, fmt.Errorf("timeout waiting for message from SSE stream")
 	}
 
 	// Parse the message as a JSON-RPC response
 	var toolResponse CallToolResponse
-	if err := json.Unmarshal(message, &toolResponse); err != nil {
+	if err := json.Unmarshal(body, &toolResponse); err != nil {
 		return nil, fmt.Errorf("failed to decode message response: %v", err)
 	}
 
@@ -222,4 +237,12 @@ func (c *Client) CallTool(toolName string, input map[string]interface{}) (*CallT
 	}
 
 	return &toolResponse.Result.Content[0], nil
+}
+
+// ToolExists checks if a tool with the given name exists
+func (c *Client) ToolExists(toolName string) bool {
+	c.toolsMu.RLock()
+	defer c.toolsMu.RUnlock()
+	_, exists := c.tools[toolName]
+	return exists
 }

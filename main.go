@@ -72,13 +72,28 @@ func run(cmd *cobra.Command, args []string) {
 		log.Fatalf("Failed to list tools: %v", err)
 	}
 
-	//Invoke a tool to list the confluence spaces
-	result, err := mcpClient.CallTool("getConfluenceSpaces", map[string]interface{}{
-		"cloudId": "https://vendasta.jira.com/wiki/",
-		"limit":   1,
-	})
-	if err != nil {
-		log.Fatalf("Failed to invoke tool: %v", err)
+	//Invoke a tool to list the confluence spaces (if it exists)
+	if mcpClient.ToolExists("getConfluenceSpaces") {
+		result, err := mcpClient.CallTool("getConfluenceSpaces", map[string]interface{}{
+			"cloudId": "https://vendasta.jira.com/wiki/",
+			"limit":   1,
+		})
+		if err != nil {
+			log.Fatalf("Failed to invoke tool: %v", err)
+		}
+		fmt.Printf("Tool invocation result: %+v\n", result)
 	}
-	fmt.Printf("Tool invocation result: %+v\n", result)
+
+	//Fetch the cortex.yaml from CS (if it exists)
+	if mcpClient.ToolExists("get_file_contents") {
+		result, err := mcpClient.CallTool("get_file_contents", map[string]interface{}{
+			"owner": "vendasta",
+			"repo":  "CS",
+			"path":  "/cortex.yaml",
+		})
+		if err != nil {
+			log.Fatalf("Failed to invoke tool: %v", err)
+		}
+		fmt.Printf("Tool invocation result: %+v\n", result)
+	}
 }
