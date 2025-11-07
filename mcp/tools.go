@@ -66,9 +66,21 @@ type Annotations struct {
 	OpenWorldHint   bool   `json:"openWorldHint"`
 }
 
-// ToolsResult represents the result structure containing tools
-type ToolsResult struct {
-	Tools []Tool `json:"tools"`
+// CallToolResponse represents the response from calling a tool
+type CallToolResponse struct {
+	JSONRPC string         `json:"jsonrpc"`
+	ID      int            `json:"id"`
+	Result  CallToolResult `json:"result,omitempty"`
+}
+type CallToolResult struct {
+	Content []CallToolContent `json:"content"`
+	IsError bool              `json:"isError"`
+}
+
+// CallToolContent represents the content returned by a tool call
+type CallToolContent struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
 }
 
 func (c *Client) ListTools() ([]Tool, error) {
@@ -138,9 +150,68 @@ func (c *Client) ListTools() ([]Tool, error) {
 		return nil, fmt.Errorf("failed to unmarshal result: %v", err)
 	}
 
-	fmt.Printf("%d tools found\n", len(result.Tools))
-	for _, tool := range result.Tools {
-		fmt.Printf(" - %s: %s\n", tool.Name, tool.Description)
-	}
 	return result.Tools, nil
+}
+
+func (c *Client) CallTool(toolName string, input map[string]interface{}) (*CallToolContent, error) {
+	// Create the JSON-RPC request payload
+	request := RPCRequest{
+		JSONRPC: "2.0",
+		ID:      c.nextID(),
+		Method:  "tools/call",
+		Params: map[string]interface{}{
+			"name":      toolName,
+			"arguments": input,
+		},
+	}
+
+	// Marshal the request into JSON
+	requestBody, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %v", err)
+	}
+	fmt.Printf("Sending CallToolRequest: %s\n", string(requestBody))
+
+	// Send the HTTP POST request
+	req, err := http.NewRequest(http.MethodPost, c.endpoint, bytes.NewBuffer(requestBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("content-type", "application/json")
+	req.Header.Add("authorization", fmt.Sprintf("Bearer %s", c.token.AccessToken))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Check HTTP status
+	if resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
+	}
+
+	fmt.Printf("Received 202 Accepted, waiting for message from SSE stream...\n")
+
+	// Wait for a message from the message channel
+	var message []byte
+	select {
+	case message = <-c.messageChan:
+		break
+	case <-time.After(30 * time.Second):
+		return nil, fmt.Errorf("timeout waiting for message from SSE stream")
+	}
+
+	// Parse the message as a JSON-RPC response
+	var toolResponse CallToolResponse
+	if err := json.Unmarshal(message, &toolResponse); err != nil {
+		return nil, fmt.Errorf("failed to decode message response: %v", err)
+	}
+
+	// Check for errors in the response
+	if toolResponse.Result.IsError {
+		return nil, fmt.Errorf("RPC error: %s", toolResponse.Result.Content[0].Text)
+	}
+
+	return &toolResponse.Result.Content[0], nil
 }

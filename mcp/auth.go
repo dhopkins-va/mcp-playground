@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os/exec"
+	"runtime"
 
 	"golang.org/x/oauth2"
 )
@@ -208,7 +210,10 @@ func (c *Client) GetOAuth2Token() error {
 	)
 
 	// Open the authorization URL in the user's browser
-	fmt.Printf("Open the following URL in your browser to authorize the client: %s\n", authURL)
+	fmt.Printf("Opening the following  authorization URL in your browser: \n\n%s\n\n", authURL)
+	if err := openBrowser(authURL); err != nil {
+		fmt.Printf("Failed to open browser automatically. Please open the following URL manually: %s\n", authURL)
+	}
 
 	// Wait for either the authorization code or an error
 	var authCode string
@@ -222,9 +227,6 @@ func (c *Client) GetOAuth2Token() error {
 
 	// Close the local server
 	server.Close()
-
-	// Exchange the authorization code for an access token using PKCE
-	fmt.Printf("Authorization code: %s\n", authCode)
 
 	// Use oauth2.Config.Exchange with PKCE code_verifier
 	ctx := context.Background()
@@ -253,4 +255,20 @@ func generatePKCE() (verifier string, challenge string, err error) {
 	challenge = base64.RawURLEncoding.EncodeToString(hash[:])
 
 	return verifier, challenge, nil
+}
+
+// openBrowser opens the specified URL in the default browser
+func openBrowser(urlStr string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", urlStr)
+	case "darwin":
+		cmd = exec.Command("open", urlStr)
+	case "linux":
+		cmd = exec.Command("xdg-open", urlStr)
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
+	return cmd.Run()
 }
