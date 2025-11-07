@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 
@@ -10,7 +9,8 @@ import (
 )
 
 var (
-	serverURL string
+	serverURL   string
+	accessToken string
 )
 
 func main() {
@@ -22,6 +22,7 @@ func main() {
 	}
 
 	rootCmd.Flags().StringVarP(&serverURL, "server", "s", "", "Address of the MCP server")
+	rootCmd.Flags().StringVarP(&accessToken, "access_token", "t", "", "Access token to use (skips OAuth discovery and token exchange)")
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatalf("Error executing command: %v", err)
 	}
@@ -32,33 +33,34 @@ func run(cmd *cobra.Command, args []string) {
 		log.Fatalf("Server URL is required. Use --server or -s flag to specify the MCP server address.")
 	}
 
-	//Discover the authorization server
-	mcpClient := mcp.CreateClient(serverURL, 8090, true)
-	err := mcpClient.DiscoverAuthorizationServer()
-	if err != nil {
-		log.Fatalf("Failed to discover authorization server: %v", err)
+	mcpClient := mcp.CreateClient(serverURL, 8090, mcp.TransportDiscover)
+
+	var err error
+	// If access token is provided, use it directly and skip OAuth flow
+	if accessToken != "" {
+		mcpClient.SetAccessToken(accessToken)
+		fmt.Printf("Using provided access token (skipping OAuth2 discovery)\n")
+	} else {
+		//Discover the authorization server
+		err = mcpClient.DiscoverAuthorizationServer()
+		if err != nil {
+			log.Fatalf("Failed to discover authorization server: %v", err)
+		}
+
+		//Register an OAuth2 client
+		err = mcpClient.RegisterOAuth2Client()
+		if err != nil {
+			log.Fatalf("Failed to register OAuth2 client: %v", err)
+		}
+
+		//Get an OAuth2 Token
+		err = mcpClient.GetOAuth2Token()
+		if err != nil {
+			log.Fatalf("Failed to get OAuth2 token: %v", err)
+		}
 	}
 
-	//Register an OAuth2 client
-	err = mcpClient.RegisterOAuth2Client()
-	if err != nil {
-		log.Fatalf("Failed to register OAuth2 client: %v", err)
-	}
-
-	//Get an OAuth2 Token
-	err = mcpClient.GetOAuth2Token()
-	if err != nil {
-		log.Fatalf("Failed to get OAuth2 token: %v", err)
-	}
-
-	// Connect to SSE and wait for endpoint event
-	ctx := context.Background()
-	_, err = mcpClient.ConnectSSE(ctx, "1234")
-	if err != nil {
-		log.Fatalf("Failed to connect to SSE or receive endpoint: %v", err)
-	}
-
-	//Initialize the MCP server using the endpoint from SSE
+	//Initialize the MCP server
 	err = mcpClient.Initialize()
 	if err != nil {
 		log.Fatalf("Failed to initialize MCP server: %v", err)

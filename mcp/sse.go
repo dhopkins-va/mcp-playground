@@ -295,6 +295,11 @@ func (c *Client) ConnectSSE(ctx context.Context, sessionID string) (string, erro
 			return
 		}
 
+		// SSE is now actively listening - set the flag
+		c.sseReadyMu.Lock()
+		c.sseReady = true
+		c.sseReadyMu.Unlock()
+
 		// Process SSE events
 		c.processSSEEvents(ctx, resp.Body, endpointChan)
 	}()

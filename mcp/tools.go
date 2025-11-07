@@ -109,6 +109,10 @@ func (c *Client) ListTools() ([]Tool, error) {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("content-type", "application/json")
+	if c.sessionId != "" {
+		req.Header.Set("mcp-session-id", c.sessionId)
+	}
+	req.Header.Set("mcp-protocol-version", c.serverVersion)
 	req.Header.Add("authorization", fmt.Sprintf("Bearer %s", c.token.AccessToken))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -178,6 +182,10 @@ func (c *Client) CallTool(toolName string, input map[string]interface{}) (*CallT
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("content-type", "application/json")
+	if c.sessionId != "" {
+		req.Header.Set("mcp-session-id", c.sessionId)
+	}
+	req.Header.Set("mcp-protocol-version", c.serverVersion)
 	req.Header.Add("authorization", fmt.Sprintf("Bearer %s", c.token.AccessToken))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
